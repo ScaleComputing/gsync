@@ -425,7 +425,7 @@ mod tests {
 
     #[test]
     fn get_sha_ok() {
-        let sha = get_temp_commit("../..");
+        let sha = get_temp_commit(".");
         println!("{:?}", sha);
         assert_eq!(sha.unwrap().trim().len(), 40);
     }
