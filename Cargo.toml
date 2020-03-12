@@ -1,0 +1,19 @@
+[package]
+name = "gsync"
+version = "0.1.0"
+authors = ["Jane Lusby <jlusby@scalecomputing.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+structopt = "0.3.2"
+shells = "0.2.0"
+shellfn = "0.1.1"
+clap = "2.33.0"
+kvfmt = "0.1"
+spandoc = "^0.1.2"
+tracing = "^0.1"
+jane-eyre = "0.1.2"
+tracing-error = "^0.1.2"
+scale = { path = "/home/jlusby/git/rust/scale" }
