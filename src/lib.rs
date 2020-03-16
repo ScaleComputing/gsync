@@ -1,19 +1,86 @@
 //! git sync cli tool
 
-use jane_eyre::{eyre, ErrReport, Help};
-use scale::{
-    flock::ScopedFlock,
-    host::{Host, Remote},
-    ibash, spanned,
-};
+use fs2::FileExt;
+use jane_eyre::{ensure, eyre, format_err, ErrReport, Help};
 use shells::wrap_bash;
 use spandoc::spandoc;
+use std::fs::File;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use structopt::{
     clap::{AppSettings, Shell},
     StructOpt,
 };
 use tracing::{info, span, Level};
+
+/// Helper macro to enter spans conveniently
+macro_rules! spanned {
+    ($local:ident) => {
+        let span = span!(Level::INFO, stringify!($local), $local);
+        let _guard = span.enter();
+    };
+    (?$local:ident) => {
+        let span = span!(Level::INFO, stringify!($local), ?$local);
+        let _guard = span.enter();
+    };
+    (%$local:ident) => {
+        let span = span!(Level::INFO, stringify!($local), %$local);
+        let _guard = span.enter();
+    };
+    ($level:expr, $local:ident) => {
+        let span = span!($level, stringify!($local), $local);
+        let _guard = span.enter();
+    };
+    ($level:expr, ?$local:ident) => {
+        let span = span!($level, stringify!($local), ?$local);
+        let _guard = span.enter();
+    };
+    ($level:expr, %$local:ident) => {
+        let span = span!($level, stringify!($local), %$local);
+        let _guard = span.enter();
+    };
+    ( $( $span:tt )* ) => {
+        let span = span!($($span)*);
+        let _guard = span.enter();
+    };
+}
+
+macro_rules! ibash {
+    ( $( $cmd:tt )* ) => {{
+        $crate::execute_interactive_with("bash", &format!($( $cmd )*))
+    }};
+}
+
+/// Error handling wrapper macro for shells::wrap_bash
+macro_rules! wrap_bash {
+    ( $( $cmd:tt )* ) => {{
+        let cmd = format!($( $cmd )*);
+        spanned!(tracing::Level::DEBUG, %cmd);
+        shells::wrap_bash!($($cmd)*)
+    }}
+}
+
+fn execute_interactive_with(shell: &str, cmd: &str) -> Result<(), ErrReport> {
+    spanned!(Level::DEBUG, %cmd);
+
+    let mut command = {
+        let mut command = Command::new(shell);
+        let _ = command.arg("-c").arg(cmd);
+        command
+    };
+
+    let status = match command.status() {
+        Ok(status) => status
+            .code()
+            .unwrap_or(if status.success() { 0 } else { 1 }),
+        Err(_) => 126,
+    };
+
+    spanned!(?status);
+    ensure!(status == 0, "Command exited with a non zero status");
+
+    Ok(())
+}
 
 #[derive(StructOpt, Debug)]
 #[structopt(
@@ -25,7 +92,7 @@ pub struct Opt {
     remote: String,
 
     /// Remote host to compile on
-    #[structopt(long = "host", default_value = &scale::buildvm_hostname())]
+    #[structopt(long = "host", env = "GSYNC_HOST")]
     host: String,
 
     /// Generates a completion file
@@ -89,20 +156,17 @@ impl Opt {
                 .ok_or_else(|| eyre!("Could not parse remote_path as unicode"))?
         };
 
-        remote.run(
-            &format!(
-                "if [ ! -d {0} ]; then
+        remote.run(&format!(
+            "if [ ! -d {0} ]; then
                     cd \"$(dirname {0})\"
                     echo \"Missing repo on remote, checking out clean copy\"
                     git clone \"{1}\" \"{0}\"
                 else
                     exit 1
                 fi",
-                remote_path,
-                self.get_git_url()?.trim(),
-            ),
-            None,
-        )?;
+            remote_path,
+            self.get_git_url()?.trim(),
+        ))?;
 
         Ok(())
     }
@@ -111,6 +175,45 @@ impl Opt {
         wrap_bash!("git push -f gsync {}:refs/heads/gsync-staging", sha)
             .map(|_| ())
             .map_err(Into::into)
+    }
+}
+
+struct Remote {
+    host: String,
+}
+
+impl Remote {
+    fn new(host: &str) -> jane_eyre::Result<Self> {
+        spanned!(Level::INFO, "Remote::new", host);
+        let remote = Remote {
+            host: host.to_owned(),
+        };
+        remote.run("true")?;
+        Ok(remote)
+    }
+
+    #[spandoc::spandoc]
+    fn run(&self, cmd: &str) -> jane_eyre::Result<()> {
+        spanned!(Level::INFO, "Remote::run", host = &self.host[..], cmd);
+
+        /// Starting cmd
+        let cmd = Command::new("ssh")
+            .arg("-q")
+            .arg("-t")
+            .arg(&self.host)
+            .arg(cmd)
+            .status()?;
+
+        /// Getting command exit status
+        let status = cmd
+            .code()
+            .ok_or_else(|| format_err!("No exit status: Command interupted"))?;
+
+        spanned!(?status);
+
+        ensure!(status == 0, "ssh exited with a non-zero status");
+
+        Ok(())
     }
 }
 
@@ -151,12 +254,26 @@ fn get_git_submodules() -> Vec<PathBuf> {
         .collect()
 }
 
+struct GsyncLock(File);
+impl GsyncLock {
+    fn new() -> jane_eyre::Result<Self> {
+        let file = File::create("/tmp/gsync.lock")?;
+        file.try_lock_exclusive()?;
+        Ok(GsyncLock(file))
+    }
+}
+impl Drop for GsyncLock {
+    fn drop(&mut self) {
+        self.0.unlock().expect("Failed to unlock GsyncLock");
+    }
+}
+
 #[spandoc::spandoc]
 pub fn run(conf: Opt) -> Result<(), ErrReport> {
     spanned!(Level::WARN, "run", ?conf);
 
     let _flock = if !conf.no_lock {
-        Some(ScopedFlock::lock_exclusive("/tmp/gsync.lock"))
+        Some(GsyncLock::new())
     } else {
         None
     };
@@ -222,7 +339,7 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
         let remove_cmd = &format!("cd {} && git checkout -- . && git clean -df", conf.remote);
 
         /// Wiping remote changes
-        remote.run(remove_cmd, None)?;
+        remote.run(remove_cmd)?;
     } else if let Ok(old_sha) = std::fs::read_to_string(".git/.gsync.sha") {
         /// Getting diff between remote working directory and local temp commit
         let diff = wrap_bash!("git diff {} {}", sha, old_sha)?;
@@ -251,9 +368,8 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
     }
 
     /// Checking out temp commit on remote
-    remote.run(
-        &format!(
-            r#"
+    remote.run(&format!(
+        r#"
             cd {} &&
                 echo $USER &&
                 git checkout --detach gsync-staging 2> /tmp/gsync.stderr &&
@@ -265,10 +381,8 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
                             cat /tmp/gsync.stderr &&
                             exit 1
                     )"#,
-            remote_path_str
-        ),
-        None,
-    )?;
+        remote_path_str
+    ))?;
 
     /// Recording sha of successfully synced temp commit
     std::fs::write(".git/.gsync.sha", sha)?;
@@ -295,8 +409,6 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
 }
 
 pub fn lib_main() -> Result<(), ErrReport> {
-    let _guard = scale::init_script("info");
-
     let conf = Opt::from_args();
 
     if let Some(shell) = conf.shell {
@@ -313,7 +425,7 @@ mod tests {
 
     #[test]
     fn get_sha_ok() {
-        let sha = get_temp_commit("../..");
+        let sha = get_temp_commit(".");
         println!("{:?}", sha);
         assert_eq!(sha.unwrap().trim().len(), 40);
     }

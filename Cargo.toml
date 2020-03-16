@@ -16,4 +16,6 @@ spandoc = "^0.1.2"
 tracing = "^0.1"
 jane-eyre = "0.1.2"
 tracing-error = "^0.1.2"
-scale = { path = "/home/jlusby/git/rust/scale" }
+tracing-subscriber = "0.2.3"
+fs2 = "0.4.3"
+color-backtrace = "0.3.0"
