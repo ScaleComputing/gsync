@@ -2,6 +2,7 @@
 
 use fs2::FileExt;
 use jane_eyre::{ensure, eyre, format_err, ErrReport, Help};
+use once_cell::sync::Lazy;
 use shells::wrap_bash;
 use spandoc::spandoc;
 use std::fs::File;
@@ -11,7 +12,63 @@ use structopt::{
     clap::{AppSettings, Shell},
     StructOpt,
 };
-use tracing::{info, span, Level};
+use tracing::{info, instrument, span, Level};
+
+#[derive(Debug)]
+pub struct RemotePath(PathBuf);
+
+#[derive(Debug)]
+pub struct RemoteRoot(&'static str);
+
+#[derive(Debug)]
+pub struct Buildvm(&'static str);
+
+impl Buildvm {
+    pub fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl RemotePath {
+    pub fn display(&self) -> impl std::fmt::Display + '_ {
+        self.0.display()
+    }
+}
+
+impl RemoteRoot {
+    #[instrument]
+    pub fn join(self, local_path: &Path) -> Result<RemotePath, ErrReport> {
+        Ok(RemotePath(Path::new(self.0).join(local_path.file_name().ok_or_else(
+            || eyre!("local path doesn't contain a filename"),
+        )?)))
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+pub fn gsync_root() -> RemoteRoot {
+    RemoteRoot(gsync_root_str())
+}
+
+fn gsync_root_str() -> &'static str {
+    static GSYNC_ROOT: Lazy<String> =
+        Lazy::new(|| std::env::var("GSYNC_ROOT").unwrap_or_else(|_| String::from("/local")));
+
+    &*GSYNC_ROOT
+}
+
+pub fn gsync_host() -> Buildvm {
+    Buildvm(gsync_host_str())
+}
+
+fn gsync_host_str() -> &'static str {
+    static GSYNC_HOST: Lazy<String> =
+        Lazy::new(|| std::env::var("GSYNC_HOST").unwrap_or_else(|_| String::from("buildvm")));
+
+    &*GSYNC_HOST
+}
 
 /// Helper macro to enter spans conveniently
 macro_rules! spanned {
@@ -88,11 +145,15 @@ fn execute_interactive_with(shell: &str, cmd: &str) -> Result<(), ErrReport> {
 )]
 pub struct Opt {
     /// The remote folder containing your git repos
-    #[structopt(short = "r", long = "remote", default_value = "/local")]
+    #[structopt(
+        short = "r",
+        long = "remote",
+        default_value = gsync_root_str()
+    )]
     remote: String,
 
     /// Remote host to compile on
-    #[structopt(long = "host", env = "GSYNC_HOST")]
+    #[structopt(long = "host", default_value = gsync_host_str())]
     host: String,
 
     /// Generates a completion file
