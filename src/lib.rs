@@ -1,13 +1,17 @@
 //! git sync cli tool
 
+use color_eyre::{Help, Report};
+use eyre::{ensure, eyre, format_err};
 use fs2::FileExt;
-use jane_eyre::{ensure, eyre, format_err, ErrReport, Help};
 use once_cell::sync::Lazy;
 use shells::wrap_bash;
 use spandoc::spandoc;
-use std::fs::File;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::{
+    env, fmt, fs,
+    fs::File,
+    path::{Path, PathBuf},
+    process::Command,
+};
 use structopt::{
     clap::{AppSettings, Shell},
     StructOpt,
@@ -30,17 +34,21 @@ impl Buildvm {
 }
 
 impl RemotePath {
-    pub fn display(&self) -> impl std::fmt::Display + '_ {
+    pub fn display(&self) -> impl fmt::Display + '_ {
         self.0.display()
     }
 }
 
 impl RemoteRoot {
     #[instrument]
-    pub fn join(self, local_path: &Path) -> Result<RemotePath, ErrReport> {
-        Ok(RemotePath(Path::new(self.0).join(local_path.file_name().ok_or_else(
-            || eyre!("local path doesn't contain a filename"),
-        )?)))
+    pub fn join(self, local_path: &Path) -> Result<RemotePath, Report> {
+        Ok(RemotePath(
+            Path::new(self.0).join(
+                local_path
+                    .file_name()
+                    .ok_or_else(|| eyre!("local path doesn't contain a filename"))?,
+            ),
+        ))
     }
 
     pub fn as_str(&self) -> &'static str {
@@ -54,7 +62,7 @@ pub fn gsync_root() -> RemoteRoot {
 
 fn gsync_root_str() -> &'static str {
     static GSYNC_ROOT: Lazy<String> =
-        Lazy::new(|| std::env::var("GSYNC_ROOT").unwrap_or_else(|_| String::from("/local")));
+        Lazy::new(|| env::var("GSYNC_ROOT").unwrap_or_else(|_| String::from("/local")));
 
     &*GSYNC_ROOT
 }
@@ -65,7 +73,7 @@ pub fn gsync_host() -> Buildvm {
 
 fn gsync_host_str() -> &'static str {
     static GSYNC_HOST: Lazy<String> =
-        Lazy::new(|| std::env::var("GSYNC_HOST").unwrap_or_else(|_| String::from("buildvm")));
+        Lazy::new(|| env::var("GSYNC_HOST").unwrap_or_else(|_| String::from("buildvm")));
 
     &*GSYNC_HOST
 }
@@ -117,7 +125,7 @@ macro_rules! wrap_bash {
     }}
 }
 
-fn execute_interactive_with(shell: &str, cmd: &str) -> Result<(), ErrReport> {
+fn execute_interactive_with(shell: &str, cmd: &str) -> Result<(), Report> {
     spanned!(Level::DEBUG, %cmd);
 
     let mut command = {
@@ -182,20 +190,20 @@ pub struct Opt {
 
 impl Opt {
     #[spandoc]
-    fn get_git_url(&self) -> jane_eyre::Result<String> {
+    fn get_git_url(&self) -> color_eyre::Result<String> {
         /// Looking up url for origin
         wrap_bash!("git remote get-url origin").map_err(Into::into)
     }
 
     #[spandoc]
-    fn cleanup_index(&self) -> jane_eyre::Result<()> {
+    fn cleanup_index(&self) -> color_eyre::Result<()> {
         /// Cleaning up git index
         ibash!("rm .git/index && git reset HEAD . && git status --poreclain || exit 1")
             .map_err(Into::into)
     }
 
     #[spandoc]
-    fn remote_path(&self, git_root: &Path) -> jane_eyre::Result<PathBuf> {
+    fn remote_path(&self, git_root: &Path) -> color_eyre::Result<PathBuf> {
         /// Getting basename of git_root
         let repo_basename = git_root
             .file_name()
@@ -206,7 +214,7 @@ impl Opt {
         Ok(remote_path.join(repo_basename))
     }
 
-    fn setup_remote_repo(&self, git_root: &Path, remote: &Remote) -> jane_eyre::Result<()> {
+    fn setup_remote_repo(&self, git_root: &Path, remote: &Remote) -> color_eyre::Result<()> {
         let remote_path = self.remote_path(git_root)?;
 
         let remote_path = {
@@ -232,7 +240,7 @@ impl Opt {
         Ok(())
     }
 
-    fn sync_files(&self, sha: &str) -> jane_eyre::Result<()> {
+    fn sync_files(&self, sha: &str) -> color_eyre::Result<()> {
         wrap_bash!("git push -f gsync {}:refs/heads/gsync-staging", sha)
             .map(|_| ())
             .map_err(Into::into)
@@ -244,7 +252,7 @@ struct Remote {
 }
 
 impl Remote {
-    fn new(host: &str) -> jane_eyre::Result<Self> {
+    fn new(host: &str) -> color_eyre::Result<Self> {
         spanned!(Level::INFO, "Remote::new", host);
         let remote = Remote {
             host: host.to_owned(),
@@ -254,7 +262,7 @@ impl Remote {
     }
 
     #[spandoc::spandoc]
-    fn run(&self, cmd: &str) -> jane_eyre::Result<()> {
+    fn run(&self, cmd: &str) -> color_eyre::Result<()> {
         spanned!(Level::INFO, "Remote::run", host = &self.host[..], cmd);
 
         /// Starting cmd
@@ -279,7 +287,7 @@ impl Remote {
 }
 
 /// create a temp commit containing all working changes except unstaged files and output the sha
-fn get_temp_commit(local: &str) -> jane_eyre::Result<String> {
+fn get_temp_commit(local: &str) -> color_eyre::Result<String> {
     wrap_bash!(
         r#"
     set -e
@@ -298,7 +306,7 @@ fn get_temp_commit(local: &str) -> jane_eyre::Result<String> {
     .map_err(Into::into)
 }
 
-fn get_git_root(start: &Path) -> jane_eyre::Result<PathBuf> {
+fn get_git_root(start: &Path) -> color_eyre::Result<PathBuf> {
     start
         .ancestors()
         .find(|a| a.join(".git").is_dir())
@@ -317,7 +325,7 @@ fn get_git_submodules() -> Vec<PathBuf> {
 
 struct GsyncLock(File);
 impl GsyncLock {
-    fn new() -> jane_eyre::Result<Self> {
+    fn new() -> color_eyre::Result<Self> {
         let file = File::create("/tmp/gsync.lock")?;
         file.try_lock_exclusive()?;
         Ok(GsyncLock(file))
@@ -330,7 +338,7 @@ impl Drop for GsyncLock {
 }
 
 #[spandoc::spandoc]
-pub fn run(conf: Opt) -> Result<(), ErrReport> {
+pub fn run(conf: Opt) -> Result<(), Report> {
     spanned!(Level::WARN, "run", ?conf);
 
     let _flock = if !conf.no_lock {
@@ -345,9 +353,8 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
     let remote = Remote::new(host)?;
 
     /// Getting the current directory
-    let current_dir = std::env::current_dir()?;
+    let current_dir = env::current_dir()?;
 
-    spanned!(Level::ERROR, "testing drop behavior");
     /// Finding the root of the git repository
     let git_root = get_git_root(&current_dir)
         .warning("`gsync` can only be run from within git repositories")?;
@@ -361,22 +368,22 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
         .ok_or_else(|| eyre!("Unable to parse remote_path as unicode"))?;
 
     /// Setting current directory to git_root
-    std::env::set_current_dir(&git_root)?;
+    env::set_current_dir(&git_root)?;
 
     // cleanup index.lock which occasionally gets orphaned after a git command
     let index = git_root.join(".git/index.lock");
     if index.is_file() {
         /// Removing orphaned .git/index.lock file
-        std::fs::remove_file(&index)?;
+        fs::remove_file(&index)?;
     }
 
     // ensure that remote is setup, if its already been setup it will return an error so we drop
     // the return value as irrelevant
-    drop(wrap_bash!(
+    let _ = wrap_bash!(
         "git remote set-url gsync \"ssh://{0}:{1}\" || git remote add gsync \"ssh://{0}:{1}\" 2>/dev/null",
         host,
         remote_path_str
-    ));
+    );
 
     /// Getting most recent commit
     ibash!("git --no-pager log --oneline -1").warning("The repo must have at least 1 commit")?;
@@ -410,7 +417,7 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
 
             // TODO remove need for scd
             /// Setting current directory back to the original directory
-            std::env::set_current_dir(&current_dir)?;
+            env::set_current_dir(&current_dir)?;
             return Ok(());
         }
     }
@@ -446,7 +453,7 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
     ))?;
 
     /// Recording sha of successfully synced temp commit
-    std::fs::write(".git/.gsync.sha", sha)?;
+    fs::write(".git/.gsync.sha", sha)?;
 
     if conf.sync_submodules {
         for submodule in &get_git_submodules() {
@@ -469,7 +476,7 @@ pub fn run(conf: Opt) -> Result<(), ErrReport> {
     Ok(())
 }
 
-pub fn lib_main() -> Result<(), ErrReport> {
+pub fn lib_main() -> Result<(), Report> {
     let conf = Opt::from_args();
 
     if let Some(shell) = conf.shell {

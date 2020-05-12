@@ -1,8 +1,8 @@
-use jane_eyre::ErrReport;
+use color_eyre::Report;
 use tracing_error::ErrorLayer;
 use tracing_subscriber::{layer::SubscriberExt, EnvFilter, Registry};
 
-fn main() -> Result<(), ErrReport> {
+fn main() -> Result<(), Report> {
     color_backtrace::install();
 
     let filter = EnvFilter::try_from_default_env()
